@@ -28,35 +28,53 @@ else
     fi
 fi
 
-# 2. 检查并安装防火墙bouncer
-echo "2. 检查防火墙bouncer..."
+# 2. 修复数据源配置（新增）
+echo "2. 修复数据源配置..."
+sudo tee /etc/crowdsec/acquis.yaml > /dev/null << 'EOF'
+filenames:
+  - /var/log/auth.log
+labels:
+  type: syslog
+---
+filenames:
+  - /var/log/syslog
+labels:
+  type: syslog
+EOF
+
+# 3. 检查并安装防火墙bouncer
+echo "3. 检查防火墙bouncer..."
 if dpkg -l | grep -q crowdsec-firewall-bouncer; then
     echo "✅ 防火墙bouncer已安装"
 else
-    echo "2.1 安装防火墙bouncer..."
+    echo "3.1 安装防火墙bouncer..."
     sudo apt install crowdsec-firewall-bouncer-iptables -y
 fi
 
-# 3. 创建API密钥
-echo "3. 配置API密钥..."
+# 4. 创建API密钥
+echo "4. 配置API密钥..."
 if sudo cscli bouncers list | grep -q firewall-bouncer; then
     echo "✅ API密钥已存在"
 else
-    echo "3.1 创建API密钥..."
+    echo "4.1 创建API密钥..."
     sudo cscli bouncers add firewall-bouncer
 fi
 
-# 4. 启动防火墙bouncer
-echo "4. 启动防火墙bouncer..."
+# 5. 启动防火墙bouncer
+echo "5. 启动防火墙bouncer..."
 sudo systemctl enable crowdsec-firewall-bouncer
 sudo systemctl start crowdsec-firewall-bouncer
 
-# 5. 安装SSH保护
-echo "5. 安装SSH保护..."
+# 6. 安装SSH保护
+echo "6. 安装SSH保护..."
 sudo cscli collections install crowdsecurity/sshd --force
 
-# 6. 配置封禁策略
-echo "6. 配置封禁策略..."
+# 7. 移除有问题的组件（新增）
+echo "7. 清理有问题的组件..."
+sudo cscli postoverflows remove crowdsecurity/cdn-whitelist 2>/dev/null || true
+
+# 8. 配置封禁策略
+echo "8. 配置封禁策略..."
 if [[ -f /etc/crowdsec/profiles.yaml ]]; then
     sudo cp /etc/crowdsec/profiles.yaml /etc/crowdsec/profiles.yaml.backup
 fi
@@ -72,8 +90,8 @@ decisions:
 on_success: break
 EOF
 
-# 7. 创建管理工具
-echo "7. 创建管理工具..."
+# 9. 创建管理工具
+echo "9. 创建管理工具..."
 sudo tee /usr/local/bin/unban > /dev/null << 'EOF'
 #!/bin/bash
 if [[ $# -eq 0 ]]; then
@@ -88,26 +106,16 @@ EOF
 
 sudo chmod +x /usr/local/bin/unban
 
-# 8. 重启服务
-echo "8. 重启服务..."
+# 10. 重启服务
+echo "10. 重启服务..."
 sudo systemctl restart crowdsec
 sleep 5
 
-# 9. 最终验证
-echo "9. 最终验证..."
+# 11. 最终验证
+echo "11. 最终验证..."
 echo "=== 服务状态 ==="
 echo "CrowdSec: $(sudo systemctl is-active crowdsec)"
 echo "防火墙Bouncer: $(sudo systemctl is-active crowdsec-firewall-bouncer)"
-
-echo ""
-echo "=== 安装验证 ==="
-echo "CrowdSec版本: $(cscli version | head -1)"
-echo "SSH保护: $(sudo cscli collections list | grep sshd || echo '需要检查')"
-
-echo ""
-echo "=== 当前状态 ==="
-sudo cscli bouncers list
-sudo cscli decisions list | head -3
 
 if sudo systemctl is-active --quiet crowdsec; then
     echo ""
