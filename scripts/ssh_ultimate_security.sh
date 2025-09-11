@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# SSH极致安全配置脚本 - 终极修复版 v6
-# 修复所有已知问题：目录创建、IPv4/IPv6监听、Socket激活等
+# SSH极致安全配置脚本 - 最终版 v6.1
+# 修复所有已知问题：目录创建、IPv4/IPv6监听、Socket激活、防火墙默认激活、自动清理22端口
 # 作者：myth815
 # 更新：2025-01-11
 
-echo "🔐 SSH极致安全配置部署 (v6 - 终极修复版)"
+echo "🔐 SSH极致安全配置部署 (v6.1 - 最终版)"
 echo "========================================="
 
 # 颜色定义
@@ -106,7 +106,7 @@ echo "   ✅ 已清理所有冲突配置文件"
 # 4. 创建最终安全配置
 echo "⚙️  创建最终安全配置..."
 $SUDO tee /etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf > /dev/null << EOF
-# SSH最终安全配置 - 最高优先级 v6
+# SSH最终安全配置 - 最高优先级 v6.1
 # ==========================================
 # 修复所有已知问题，确保配置生效
 
@@ -265,7 +265,7 @@ else
     fi
 fi
 
-# 9. 配置防火墙规则
+# 9. 配置防火墙规则（改进：默认激活）
 echo "🔥 配置防火墙规则..."
 
 # UFW防火墙配置
@@ -284,9 +284,12 @@ if command -v ufw >/dev/null 2>&1; then
         
         if [ "$UFW_STATUS" = "inactive" ]; then
             echo "   ⚠️  防火墙当前未激活"
-            read -p "   是否激活UFW防火墙？(y/n): " -n 1 -r
+            echo "   为了安全建议激活防火墙"
+            # 改进：默认为Y，回车即激活
+            read -p "   是否激活UFW防火墙？[Y/n]: " -r
             echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
+            # 如果输入为空或者是Y/y，则激活
+            if [[ -z "$REPLY" || $REPLY =~ ^[Yy]$ ]]; then
                 echo "y" | $SUDO ufw enable >/dev/null 2>&1
                 echo "   ✅ UFW防火墙已激活"
             else
@@ -621,8 +624,8 @@ case "$1" in
         fi
         ;;
     *)
-        echo "SSH安全配置管理工具 v6"
-        echo "========================"
+        echo "SSH安全配置管理工具 v6.1"
+        echo "========================="
         echo ""
         echo "用法: $0 {status|restore|test|diagnose|fix}"
         echo ""
@@ -672,9 +675,6 @@ echo "📋 重要提醒:"
 echo "   - SSH监听端口: $SSH_PORT"
 echo "   - 密码认证已禁用（仅密钥）"
 echo "   - 仅允许用户: $SSH_USER"
-if [ "$SSH_PORT" != "22" ]; then
-    echo -e "${YELLOW}   - 确认连接正常后执行: sudo ufw delete allow 22/tcp${NC}"
-fi
 echo ""
 
 echo "🛠️  管理命令:"
@@ -691,23 +691,43 @@ echo ""
 echo "📁 配置备份: $BACKUP_DIR"
 echo ""
 
-# 17. 最终连接测试
+# 17. 最终连接测试和22端口清理（改进：自动询问删除22端口）
 echo "🧪 执行最终测试..."
-TEST_PASSED=true
+TEST_PASSED=false
 
 # 测试本地IPv4连接
 if timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$SSH_PORT" 2>/dev/null; then
     echo -e "${GREEN}   ✅ IPv4连接测试通过${NC}"
+    TEST_PASSED=true
 else
     echo -e "${YELLOW}   ⚠️ IPv4连接测试失败（可能需要触发）${NC}"
-    TEST_PASSED=false
 fi
 
 # 测试本地IPv6连接
 if timeout 2 bash -c "echo > /dev/tcp/::1/$SSH_PORT" 2>/dev/null; then
     echo -e "${GREEN}   ✅ IPv6连接测试通过${NC}"
+    TEST_PASSED=true
 else
     echo -e "${YELLOW}   ⚠️ IPv6连接测试失败（可能未启用IPv6）${NC}"
+fi
+
+# 如果测试通过且端口不是22，询问是否删除22端口规则
+if [ "$TEST_PASSED" = true ] && [ "$SSH_PORT" != "22" ]; then
+    if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q "22/tcp"; then
+        echo ""
+        echo "🔒 安全清理："
+        echo "   检测到防火墙仍允许端口22"
+        read -p "   是否删除22端口规则以提高安全性？[Y/n]: " -r
+        echo
+        if [[ -z "$REPLY" || $REPLY =~ ^[Yy]$ ]]; then
+            $SUDO ufw delete allow 22/tcp >/dev/null 2>&1
+            echo -e "${GREEN}   ✅ 已删除22端口规则${NC}"
+            echo "   提示：如需恢复，执行: sudo ufw allow 22/tcp"
+        else
+            echo "   ⚠️  保留22端口，请在确认稳定后手动删除："
+            echo "   sudo ufw delete allow 22/tcp"
+        fi
+    fi
 fi
 
 if [ "$TEST_PASSED" = false ] && [ "$USE_SOCKET_ACTIVATION" = true ]; then
