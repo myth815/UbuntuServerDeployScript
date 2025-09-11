@@ -1,383 +1,280 @@
 #!/bin/bash
 
-# SSH极致安全配置脚本 - 最终修复版 v4
-# 修复所有已知问题：用户配置、算法兼容性、密码认证禁用
+# SSH配置测试验证脚本
+# 用于验证SSH安全配置是否正确应用
 
-echo "🔐 SSH极致安全配置部署 (v4)"
-echo "============================="
-
-# 检查权限
-if [ "$EUID" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-    SUDO="sudo"
-else
-    SUDO=""
-fi
-
-# 配置参数 - 支持环境变量自定义
-SSH_PORT=${SSH_PORT:-9833}
-SSH_USER=${SSH_USER:-$(whoami)}
-
-echo "⚙️  配置参数:"
-echo "   SSH端口: $SSH_PORT"
-echo "   允许用户: $SSH_USER (当前执行用户)"
-echo "   安全级别: 高级安全 + 客户端兼容性"
-echo ""
-echo "💡 提示: 可通过环境变量自定义"
-echo "   SSH_PORT=8022 SSH_USER=myuser $0"
+echo "🔍 SSH配置完整性测试"
+echo "====================="
 echo ""
 
-# 确认用户存在
-if ! id "$SSH_USER" &>/dev/null; then
-    echo "❌ 错误: 用户 $SSH_USER 不存在"
-    echo "   请先创建用户: sudo useradd -m -s /bin/bash $SSH_USER"
-    exit 1
-fi
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# 1. 备份现有配置
-echo "📁 备份现有配置..."
-$SUDO cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d-%H%M%S)
+# 测试结果计数
+PASS=0
+FAIL=0
+WARN=0
 
-# 2. 彻底清理冲突配置文件
-echo "🗑️  清理冲突配置文件..."
-$SUDO rm -f /etc/ssh/sshd_config.d/99-*.conf 2>/dev/null
-# 删除Ubuntu默认的冲突配置文件
-$SUDO rm -f /etc/ssh/sshd_config.d/01-PasswordAuthentication.conf 2>/dev/null
-$SUDO rm -f /etc/ssh/sshd_config.d/01-permitrootlogin.conf 2>/dev/null
-$SUDO rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf 2>/dev/null
-echo "   ✅ 已清理所有冲突配置文件"
-
-# 3. 创建最终安全配置（最高优先级）
-echo "⚙️  创建最终安全配置..."
-$SUDO tee /etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf << EOF
-# SSH最终安全配置 - 最高优先级 v4
-# ==========================================
-# 修复所有已知问题，确保配置生效
-
-# 基础安全设置 - 多重禁用密码认证
-PermitRootLogin no
-PasswordAuthentication no
-ChallengeResponseAuthentication no
-KbdInteractiveAuthentication no
-PubkeyAuthentication yes
-PermitEmptyPasswords no
-UsePAM yes
-
-# 连接限制
-MaxAuthTries 3
-MaxSessions 2
-LoginGraceTime 30
-ClientAliveInterval 300
-ClientAliveCountMax 2
-
-# 用户限制
-AllowUsers $SSH_USER
-
-# 现代加密算法 - 兼容性优先
-KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
-Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
-MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
-HostKeyAlgorithms ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256
-PubkeyAcceptedAlgorithms ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256
-
-# 严格模式
-StrictModes yes
-IgnoreRhosts yes
-HostbasedAuthentication no
-
-# 禁用非必要功能
-X11Forwarding no
-AllowTcpForwarding no
-AllowAgentForwarding no
-AllowStreamLocalForwarding no
-GatewayPorts no
-PermitTunnel no
-Compression no
-PermitUserEnvironment no
-
-# 网络配置
-TCPKeepAlive yes
-UseDNS no
-MaxStartups 3:50:10
-
-# 日志设置
-LogLevel VERBOSE
-SyslogFacility AUTH
-
-# 终端设置
-PermitTTY yes
-PrintLastLog yes
-VersionAddendum none
-
-# 端口配置
-Port $SSH_PORT
-
-# 最终确保密码认证禁用 - 冗余设置确保生效
-Match all
-    PasswordAuthentication no
-    ChallengeResponseAuthentication no
-    KbdInteractiveAuthentication no
-EOF
-
-# 4. 同时修改主配置文件确保无冲突
-echo "🔧 修改主配置文件..."
-$SUDO sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-$SUDO sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-$SUDO sed -i 's/#ChallengeResponseAuthentication yes/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
-$SUDO sed -i 's/ChallengeResponseAuthentication yes/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
-
-# 5. 创建必要目录
-echo "📁 创建必要目录..."
-$SUDO mkdir -p /run/sshd
-
-# 6. 验证配置语法
-echo "🔍 验证配置语法..."
-if ! $SUDO sshd -t; then
-    echo "   ❌ 配置语法错误，退出"
-    exit 1
-fi
-
-# 7. 检查SSH密钥配置
-echo "🔑 检查SSH密钥配置..."
-USER_HOME=$(eval echo ~$SSH_USER)
-SSH_DIR="$USER_HOME/.ssh"
-AUTHORIZED_KEYS="$SSH_DIR/authorized_keys"
-
-if [ -f "$AUTHORIZED_KEYS" ]; then
-    KEY_COUNT=$(wc -l < "$AUTHORIZED_KEYS" 2>/dev/null || echo 0)
-    echo "   ✅ 发现 $KEY_COUNT 个授权密钥"
+# 测试函数
+test_check() {
+    local test_name="$1"
+    local test_cmd="$2"
+    local expected="$3"
     
-    # 自动修复权限问题
-    echo "   🔧 修复SSH目录和密钥文件权限..."
-    $SUDO chown -R "$SSH_USER:$SSH_USER" "$SSH_DIR"
-    $SUDO chmod 700 "$SSH_DIR"
-    $SUDO chmod 600 "$AUTHORIZED_KEYS"
+    echo -n "检查: $test_name ... "
     
-    # 检查密钥类型
-    if grep -q "ssh-ed25519" "$AUTHORIZED_KEYS" 2>/dev/null; then
-        echo "   ✅ 检测到ED25519密钥（推荐）"
-    elif grep -q "ssh-rsa" "$AUTHORIZED_KEYS" 2>/dev/null; then
-        echo "   ⚠️  检测到RSA密钥（兼容但不如ED25519安全）"
-    fi
-else
-    echo "   ❌ 未找到授权密钥文件: $AUTHORIZED_KEYS"
-    echo "   💡 请确保已配置SSH密钥"
-fi
-
-# 8. 应用配置
-echo "🔄 应用配置..."
-
-echo "   🔄 重新加载systemd配置..."
-$SUDO systemctl daemon-reload
-
-echo "   🔄 重启SSH服务..."
-if $SUDO systemctl restart ssh.socket; then
-    echo "   ✅ SSH socket重启成功"
-elif $SUDO systemctl restart ssh; then
-    echo "   ✅ SSH服务重启成功（传统模式）"
-else
-    echo "   ❌ SSH服务重启失败，尝试强制恢复..."
-    $SUDO systemctl stop ssh ssh.socket
-    $SUDO systemctl disable ssh.socket
-    if $SUDO systemctl start ssh; then
-        echo "   ✅ SSH服务强制启动成功"
+    result=$(eval "$test_cmd" 2>/dev/null)
+    
+    if [ "$result" = "$expected" ]; then
+        echo -e "${GREEN}✅ 通过${NC}"
+        ((PASS++))
+        return 0
     else
-        echo "   ❌ SSH服务启动完全失败"
-        exit 1
+        echo -e "${RED}❌ 失败${NC}"
+        echo "  期望: $expected"
+        echo "  实际: $result"
+        ((FAIL++))
+        return 1
     fi
-fi
+}
 
-# 启用服务自启动
-$SUDO systemctl enable ssh 2>/dev/null
-
-# 等待服务完全启动
-sleep 3
-
-# 9. 关键安全验证
-echo "🔐 关键安全配置验证..."
-PASSWORD_AUTH=$($SUDO sshd -T | grep "^passwordauthentication" | awk '{print $2}')
-PUBKEY_AUTH=$($SUDO sshd -T | grep "^pubkeyauthentication" | awk '{print $2}')
-ROOT_LOGIN=$($SUDO sshd -T | grep "^permitrootlogin" | awk '{print $2}')
-
-echo "   密码认证状态: $PASSWORD_AUTH"
-echo "   公钥认证状态: $PUBKEY_AUTH"
-echo "   Root登录状态: $ROOT_LOGIN"
-
-if [ "$PASSWORD_AUTH" = "no" ]; then
-    echo "   ✅ 密码认证已成功禁用"
-else
-    echo "   ❌ 警告: 密码认证仍然启用！安全风险！"
-    echo "   🔧 尝试强制修复..."
+test_warn() {
+    local test_name="$1"
+    local test_cmd="$2"
     
-    # 强制修复措施
-    echo 'PasswordAuthentication no' | $SUDO tee -a /etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf
-    echo 'ChallengeResponseAuthentication no' | $SUDO tee -a /etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf
-    $SUDO systemctl restart ssh
+    echo -n "检查: $test_name ... "
     
-    # 再次验证
-    PASSWORD_AUTH_RETRY=$($SUDO sshd -T | grep "^passwordauthentication" | awk '{print $2}')
-    if [ "$PASSWORD_AUTH_RETRY" = "no" ]; then
-        echo "   ✅ 密码认证修复成功"
+    if eval "$test_cmd" >/dev/null 2>&1; then
+        echo -e "${GREEN}✅ 通过${NC}"
+        ((PASS++))
+        return 0
     else
-        echo "   ❌ 密码认证修复失败，需要手动检查"
+        echo -e "${YELLOW}⚠️  警告${NC}"
+        ((WARN++))
+        return 1
+    fi
+}
+
+# 1. 检查服务状态
+echo "1️⃣  服务状态检查"
+echo "----------------"
+
+test_check "SSH服务运行状态" \
+    "systemctl is-active ssh" \
+    "active"
+
+test_check "SSH Socket状态(如果存在)" \
+    "systemctl is-active ssh.socket 2>/dev/null || echo 'not-found'" \
+    "active"
+
+if [ "$(systemctl is-active ssh.socket 2>/dev/null)" = "active" ]; then
+    test_check "Socket触发关系" \
+        "systemctl show ssh.service -p TriggeredBy --value | grep -q ssh.socket && echo 'yes' || echo 'no'" \
+        "yes"
+fi
+
+echo ""
+
+# 2. 端口配置检查
+echo "2️⃣  端口配置检查"
+echo "----------------"
+
+# 获取配置的端口
+CONFIG_PORT=$(sudo sshd -T 2>/dev/null | grep "^port" | awk '{print $2}')
+echo "配置端口: $CONFIG_PORT"
+
+# 检查实际监听端口
+LISTENING_PORTS=$(sudo ss -tlnp | grep -E 'sshd|systemd' | grep -oE ':[0-9]+' | cut -d: -f2 | sort -u | tr '\n' ' ')
+echo "监听端口: $LISTENING_PORTS"
+
+test_check "端口监听状态" \
+    "sudo ss -tlnp | grep -q \":$CONFIG_PORT\" && echo 'listening' || echo 'not-listening'" \
+    "listening"
+
+# 如果使用socket激活，检查socket配置
+if [ -f /etc/systemd/system/ssh.socket.d/override.conf ]; then
+    SOCKET_PORT=$(grep "ListenStream=" /etc/systemd/system/ssh.socket.d/override.conf | grep -v "^#" | tail -1 | cut -d= -f2)
+    test_check "Socket端口配置" \
+        "[ '$SOCKET_PORT' = '$CONFIG_PORT' ] && echo 'match' || echo 'mismatch'" \
+        "match"
+fi
+
+echo ""
+
+# 3. 安全配置检查
+echo "3️⃣  安全配置检查"
+echo "----------------"
+
+test_check "密码认证禁用" \
+    "sudo sshd -T 2>/dev/null | grep '^passwordauthentication' | awk '{print \$2}'" \
+    "no"
+
+test_check "公钥认证启用" \
+    "sudo sshd -T 2>/dev/null | grep '^pubkeyauthentication' | awk '{print \$2}'" \
+    "yes"
+
+test_check "Root登录禁用" \
+    "sudo sshd -T 2>/dev/null | grep '^permitrootlogin' | awk '{print \$2}'" \
+    "no"
+
+test_check "空密码禁用" \
+    "sudo sshd -T 2>/dev/null | grep '^permitemptypasswords' | awk '{print \$2}'" \
+    "no"
+
+# 检查允许的用户
+ALLOWED_USERS=$(sudo sshd -T 2>/dev/null | grep '^allowusers' | cut -d' ' -f2-)
+if [ -n "$ALLOWED_USERS" ]; then
+    echo "允许的用户: $ALLOWED_USERS"
+else
+    echo -e "${YELLOW}⚠️  未设置用户限制${NC}"
+    ((WARN++))
+fi
+
+echo ""
+
+# 4. 加密算法检查
+echo "4️⃣  加密算法检查"
+echo "----------------"
+
+test_warn "现代密钥交换算法" \
+    "sudo sshd -T 2>/dev/null | grep '^kexalgorithms' | grep -q 'curve25519-sha256'"
+
+test_warn "现代加密算法" \
+    "sudo sshd -T 2>/dev/null | grep '^ciphers' | grep -q 'chacha20-poly1305@openssh.com'"
+
+test_warn "ED25519密钥支持" \
+    "sudo sshd -T 2>/dev/null | grep '^pubkeyacceptedalgorithms' | grep -q 'ssh-ed25519'"
+
+echo ""
+
+# 5. 防火墙检查
+echo "5️⃣  防火墙配置检查"
+echo "------------------"
+
+if command -v ufw >/dev/null 2>&1; then
+    UFW_STATUS=$(sudo ufw status 2>/dev/null | grep -i "^status:" | awk '{print $2}')
+    echo "UFW状态: $UFW_STATUS"
+    
+    if [ "$UFW_STATUS" = "active" ]; then
+        test_check "UFW端口$CONFIG_PORT开放" \
+            "sudo ufw status | grep -q \"$CONFIG_PORT/tcp\" && echo 'open' || echo 'closed'" \
+            "open"
+    else
+        echo -e "${YELLOW}⚠️  UFW防火墙未激活${NC}"
+        ((WARN++))
     fi
 fi
 
-# 10. 端口验证
-echo "📊 端口状态验证..."
-if $SUDO ss -tlnp | grep -q ":$SSH_PORT"; then
-    echo "   ✅ 端口$SSH_PORT监听正常"
-else
-    echo "   ❌ 端口$SSH_PORT未监听"
+if command -v firewall-cmd >/dev/null 2>&1; then
+    if sudo firewall-cmd --state 2>/dev/null | grep -q "running"; then
+        test_check "Firewalld端口$CONFIG_PORT开放" \
+            "sudo firewall-cmd --list-ports | grep -q \"$CONFIG_PORT/tcp\" && echo 'open' || echo 'closed'" \
+            "open"
+    fi
 fi
 
-if $SUDO ss -tlnp | grep -q ":22"; then
-    echo "   ⚠️  端口22仍在监听"
-else
-    echo "   ✅ 端口22已关闭"
+echo ""
+
+# 6. 配置文件检查
+echo "6️⃣  配置文件检查"
+echo "----------------"
+
+test_check "安全配置文件存在" \
+    "[ -f /etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf ] && echo 'exists' || echo 'missing'" \
+    "exists"
+
+test_warn "配置语法正确" \
+    "sudo sshd -t -f /etc/ssh/sshd_config"
+
+if [ -d /etc/ssh/backups ]; then
+    BACKUP_COUNT=$(ls -1 /etc/ssh/backups/ 2>/dev/null | wc -l)
+    echo "配置备份数量: $BACKUP_COUNT"
 fi
 
-# 11. 算法兼容性检查
-echo "🔧 算法兼容性检查..."
-if $SUDO sshd -T | grep "^kexalgorithms" | grep -q "curve25519-sha256"; then
-    echo "   ✅ 客户端兼容算法已启用"
+echo ""
+
+# 7. 连接测试
+echo "7️⃣  连接能力测试"
+echo "----------------"
+
+# 本地连接测试
+if timeout 2 bash -c "echo > /dev/tcp/localhost/$CONFIG_PORT" 2>/dev/null; then
+    echo -e "${GREEN}✅ 本地端口可访问${NC}"
+    ((PASS++))
 else
-    echo "   ⚠️  可能存在客户端兼容性问题"
+    echo -e "${RED}❌ 本地端口不可访问${NC}"
+    ((FAIL++))
 fi
 
-# 12. 获取服务器信息
-echo ""
-echo "🌐 服务器信息:"
-SERVER_IPv4=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K\S+' || hostname -I | awk '{print $1}')
-echo "   IP地址: $SERVER_IPv4"
-echo "   主机名: $(hostname)"
-echo "   SSH端口: $SSH_PORT"
-echo "   允许用户: $SSH_USER"
+# 测试SSH协议响应
+if echo "quit" | timeout 2 telnet localhost $CONFIG_PORT 2>/dev/null | grep -q "SSH-2.0"; then
+    echo -e "${GREEN}✅ SSH协议响应正常${NC}"
+    ((PASS++))
+else
+    echo -e "${YELLOW}⚠️  SSH协议响应异常${NC}"
+    ((WARN++))
+fi
 
-# 13. 完成报告
-echo ""
-echo "✅ SSH极致安全配置部署完成！"
-echo "==================================="
-echo ""
-echo "🔒 安全特性:"
-echo "   - 密码认证强制禁用（多重保障）"
-echo "   - 现代加密算法（抗量子 + 兼容fallback）"
-echo "   - 多密钥类型支持"
-echo "   - 严格连接限制"
-echo "   - 仅允许指定用户: $SSH_USER"
 echo ""
 
-echo "🧪 连接测试命令:"
-echo ""
-echo "   Linux/macOS:"
-echo "   ssh -i ~/.ssh/id_ed25519 $SSH_USER@$SERVER_IPv4 -p $SSH_PORT"
-echo ""
-echo "   Windows PowerShell:"
-echo "   ssh -i \"\$env:USERPROFILE\\.ssh\\id_ed25519\" $SSH_USER@$SERVER_IPv4 -p $SSH_PORT"
+# 8. 密钥文件检查
+echo "8️⃣  密钥配置检查"
+echo "----------------"
+
+CURRENT_USER=$(whoami)
+if [ -f "$HOME/.ssh/authorized_keys" ]; then
+    KEY_COUNT=$(wc -l < "$HOME/.ssh/authorized_keys")
+    echo "当前用户($CURRENT_USER)授权密钥数: $KEY_COUNT"
+    
+    # 检查权限
+    test_check "SSH目录权限(700)" \
+        "stat -c %a $HOME/.ssh" \
+        "700"
+    
+    test_check "authorized_keys权限(600)" \
+        "stat -c %a $HOME/.ssh/authorized_keys" \
+        "600"
+else
+    echo -e "${YELLOW}⚠️  当前用户无授权密钥${NC}"
+    ((WARN++))
+fi
+
 echo ""
 
-echo "📋 重要提醒:"
-echo "   - SSH现在仅监听端口 $SSH_PORT"
-echo "   - 密码认证已被强制禁用"
-echo "   - 仅允许用户 $SSH_USER 登录"
-echo "   - 配置兼容主流SSH客户端"
+# 总结
+echo "📊 测试结果总结"
+echo "==============="
+echo -e "通过: ${GREEN}$PASS${NC}"
+echo -e "失败: ${RED}$FAIL${NC}"
+echo -e "警告: ${YELLOW}$WARN${NC}"
 echo ""
 
-echo "🆘 应急恢复（如果连接失败）:"
-echo "   sudo systemctl stop ssh"
-echo "   sudo rm /etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf"
-echo "   sudo systemctl daemon-reload && sudo systemctl restart ssh"
+if [ $FAIL -eq 0 ]; then
+    if [ $WARN -eq 0 ]; then
+        echo -e "${GREEN}🎉 所有测试通过！SSH配置完美。${NC}"
+    else
+        echo -e "${GREEN}✅ 核心测试通过，但有一些警告需要注意。${NC}"
+    fi
+else
+    echo -e "${RED}❌ 存在配置问题，请运行 'ssh-security-manage diagnose' 诊断。${NC}"
+fi
+
+# 提供下一步建议
 echo ""
-
-# 14. 生成最终管理脚本
-$SUDO tee /usr/local/bin/ssh-security-manage << 'SCRIPT_EOF'
-#!/bin/bash
-case "$1" in
-    "status")
-        echo "SSH服务状态:"
-        sudo systemctl status ssh --no-pager -l
-        echo ""
-        echo "端口监听:"
-        sudo ss -tlnp | grep ssh
-        echo ""
-        echo "安全配置状态:"
-        PASSWORD_AUTH=$(sudo sshd -T | grep "^passwordauthentication" | awk '{print $2}')
-        PUBKEY_AUTH=$(sudo sshd -T | grep "^pubkeyauthentication" | awk '{print $2}')
-        ROOT_LOGIN=$(sudo sshd -T | grep "^permitrootlogin" | awk '{print $2}')
-        echo "密码认证: $PASSWORD_AUTH"
-        echo "公钥认证: $PUBKEY_AUTH"
-        echo "Root登录: $ROOT_LOGIN"
-        ;;
-    "restore")
-        echo "恢复SSH默认配置..."
-        sudo systemctl stop ssh
-        sudo rm -f /etc/ssh/sshd_config.d/99-zzz-*.conf
-        sudo systemctl daemon-reload
-        sudo systemctl restart ssh
-        echo "✅ 已恢复默认配置（端口22）"
-        ;;
-    "test")
-        echo "SSH连接和安全测试:"
-        PORTS=$(sudo ss -tlnp | grep ssh | grep -oP ':\K[0-9]+' | sort -u)
-        for PORT in $PORTS; do
-            if timeout 3 bash -c "echo quit | telnet localhost $PORT" 2>/dev/null | grep -q "SSH-2.0"; then
-                echo "端口 $PORT: ✅ 正常"
-            else
-                echo "端口 $PORT: ❌ 异常"
-            fi
-        done
-        echo ""
-        PASSWORD_AUTH=$(sudo sshd -T | grep "^passwordauthentication" | awk '{print $2}')
-        if [ "$PASSWORD_AUTH" = "no" ]; then
-            echo "密码认证: ✅ 已禁用"
-        else
-            echo "密码认证: ❌ 仍启用（安全风险！）"
-        fi
-        ;;
-    "fix-password")
-        echo "强制修复密码认证问题..."
-        sudo rm -f /etc/ssh/sshd_config.d/01-*.conf
-        echo 'PasswordAuthentication no' | sudo tee -a /etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf
-        echo 'ChallengeResponseAuthentication no' | sudo tee -a /etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf
-        sudo systemctl restart ssh
-        PASSWORD_AUTH=$(sudo sshd -T | grep "^passwordauthentication" | awk '{print $2}')
-        if [ "$PASSWORD_AUTH" = "no" ]; then
-            echo "✅ 密码认证修复成功"
-        else
-            echo "❌ 密码认证修复失败"
-        fi
-        ;;
-    "user")
-        USER=${2:-$(whoami)}
-        echo "为用户 $USER 配置SSH访问权限..."
-        if id "$USER" &>/dev/null; then
-            sudo sed -i "s/AllowUsers .*/AllowUsers $USER/" /etc/ssh/sshd_config.d/99-zzz-*.conf
-            sudo systemctl restart ssh
-            echo "✅ 已更新允许用户为: $USER"
-        else
-            echo "❌ 用户 $USER 不存在"
-        fi
-        ;;
-    *)
-        echo "SSH安全配置管理工具 v4"
-        echo "========================"
-        echo ""
-        echo "用法: $0 {status|restore|test|fix-password|user [用户名]}"
-        echo ""
-        echo "  status       - 查看SSH服务和安全配置状态"
-        echo "  restore      - 恢复默认SSH配置"
-        echo "  test         - 测试SSH端口和安全配置"
-        echo "  fix-password - 强制修复密码认证问题"
-        echo "  user         - 修改允许登录的用户"
-        echo ""
-        echo "示例:"
-        echo "  $0 status"
-        echo "  $0 test"
-        echo "  $0 fix-password"
-        echo "  $0 user alice"
-        ;;
-esac
-SCRIPT_EOF
-
-$SUDO chmod +x /usr/local/bin/ssh-security-manage
-
-echo "🎉 最终部署完成！管理命令: ssh-security-manage"
+echo "💡 建议操作："
+if [ $FAIL -gt 0 ]; then
+    echo "1. 运行诊断: ssh-security-manage diagnose"
+    echo "2. 查看日志: sudo journalctl -u ssh -u ssh.socket -n 50"
+    echo "3. 如需恢复: ssh-security-manage restore"
+elif [ $WARN -gt 0 ]; then
+    echo "1. 检查警告项目并根据需要调整"
+    echo "2. 确保防火墙已正确配置"
+    echo "3. 验证远程连接: ssh user@server -p $CONFIG_PORT"
+else
+    echo "1. 测试远程连接确保一切正常"
+    echo "2. 保存配置备份: sudo tar -czf ~/ssh-config-backup.tar.gz /etc/ssh/"
+    echo "3. 如果端口已更改，记得关闭旧端口: sudo ufw delete allow 22/tcp"
+fi
