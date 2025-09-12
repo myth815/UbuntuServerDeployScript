@@ -2,8 +2,8 @@
 
 # CrowdSec完整部署脚本 - 黑名单优化版
 # 作者: myth815
-# 版本: 2.1
-# 特点: 自动处理sudo，优化社区黑名单，修复已知问题
+# 版本: 2.2
+# 特点: 自动处理sudo，优化社区黑名单，修复已知问题，包含cs-test工具
 
 # 颜色定义
 RED='\033[0;31m'
@@ -391,7 +391,7 @@ esac
 EOF
 
 # 设置执行权限
-chmod +x /usr/local/bin/cs-{unban,status,monitor,whitelist}
+chmod +x /usr/local/bin/cs-{unban,status,monitor,whitelist,test}
 echo -e "${GREEN}  ✓ 管理工具创建完成${NC}"
 
 # 11. 优化配置
