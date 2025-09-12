@@ -2,10 +2,8 @@
 
 # CrowdSec完整部署脚本 - 黑名单优化版
 # 作者: myth815
-# 版本: 2.0
-# 特点: 优化社区黑名单，修复已知问题，适合动态IP用户
-
-set -euo pipefail
+# 版本: 2.1
+# 特点: 自动处理sudo，优化社区黑名单，修复已知问题
 
 # 颜色定义
 RED='\033[0;31m'
@@ -15,22 +13,44 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo "================================================"
-echo "   CrowdSec安全防护系统部署脚本 v2.0"
+echo "   CrowdSec安全防护系统部署脚本 v2.1"
 echo "   优化: 社区黑名单 | 动态IP友好"
 echo "================================================"
 echo ""
 
-# 检查root权限
-if [[ $EUID -ne 0 ]] && ! sudo -n true 2>/dev/null; then
-   echo -e "${RED}错误: 需要sudo权限${NC}"
-   echo "请使用: sudo bash $0"
-   exit 1
+# 自动处理sudo权限
+if [[ $EUID -ne 0 ]]; then
+    echo "需要管理员权限，正在提升权限..."
+    
+    # 检测是否通过管道运行
+    if [[ ! -t 0 ]] || [[ "${BASH_SOURCE[0]}" == "/dev/stdin" ]] || [[ ! -f "${BASH_SOURCE[0]}" ]]; then
+        # 保存脚本到临时文件
+        TEMP_SCRIPT=$(mktemp /tmp/crowdsec_deploy.XXXXXX.sh)
+        # 从标准输入或当前脚本读取内容
+        if [[ ! -t 0 ]]; then
+            cat > "$TEMP_SCRIPT"
+        else
+            curl -s https://raw.githubusercontent.com/myth815/UbuntuServerDeployScript/refs/heads/main/scripts/crowdsec_deploy.sh > "$TEMP_SCRIPT"
+        fi
+        chmod +x "$TEMP_SCRIPT"
+        echo "执行安装脚本..."
+        sudo bash "$TEMP_SCRIPT"
+        EXIT_CODE=$?
+        rm -f "$TEMP_SCRIPT"
+        exit $EXIT_CODE
+    else
+        # 本地文件直接用sudo重新执行
+        exec sudo bash "$0" "$@"
+    fi
 fi
+
+# 设置错误处理
+set -euo pipefail
 
 # 1. 系统准备
 echo -e "${BLUE}[1/12] 系统准备...${NC}"
-sudo apt update >/dev/null 2>&1
-sudo apt install -y curl wget gnupg apt-transport-https >/dev/null 2>&1
+apt update >/dev/null 2>&1
+apt install -y curl wget gnupg apt-transport-https >/dev/null 2>&1
 
 # 2. 检查并卸载旧版本
 echo -e "${BLUE}[2/12] 检查现有安装...${NC}"
@@ -41,16 +61,16 @@ if command -v cscli >/dev/null 2>&1; then
     # 检查配置问题
     if dpkg -l | grep -E "^[^i].*crowdsec" >/dev/null 2>&1; then
         echo -e "  ${YELLOW}修复配置问题...${NC}"
-        sudo dpkg --configure -a >/dev/null 2>&1 || true
+        dpkg --configure -a >/dev/null 2>&1 || true
     fi
     
     read -p "  是否重新安装? [y/N]: " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "  卸载旧版本..."
-        sudo systemctl stop crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
-        sudo apt remove --purge -y crowdsec crowdsec-firewall-bouncer-iptables 2>/dev/null || true
-        sudo rm -rf /etc/crowdsec 2>/dev/null || true
+        systemctl stop crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
+        apt remove --purge -y crowdsec crowdsec-firewall-bouncer-iptables 2>/dev/null || true
+        rm -rf /etc/crowdsec 2>/dev/null || true
     else
         echo "  保留现有安装，执行优化配置..."
     fi
@@ -61,17 +81,17 @@ if ! command -v cscli >/dev/null 2>&1; then
     echo -e "${BLUE}[3/12] 安装CrowdSec核心...${NC}"
     
     # 添加官方仓库
-    curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | sudo bash >/dev/null 2>&1
+    curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash >/dev/null 2>&1
     
     # 预创建目录避免错误
-    sudo mkdir -p /etc/crowdsec/{whitelists,patterns,scenarios,parsers,collections,postoverflows}
-    sudo mkdir -p /run/crowdsec
+    mkdir -p /etc/crowdsec/{whitelists,patterns,scenarios,parsers,collections,postoverflows}
+    mkdir -p /run/crowdsec
     
     # 安装（忽略初始配置错误）
-    sudo DEBIAN_FRONTEND=noninteractive apt install -y crowdsec 2>&1 | grep -v "403" || true
+    DEBIAN_FRONTEND=noninteractive apt install -y crowdsec 2>&1 | grep -v "403" || true
     
     # 修复dpkg配置
-    sudo dpkg --configure -a >/dev/null 2>&1 || true
+    dpkg --configure -a >/dev/null 2>&1 || true
     
     if ! command -v cscli >/dev/null 2>&1; then
         echo -e "${RED}  安装失败！${NC}"
@@ -84,7 +104,7 @@ fi
 
 # 4. 配置数据采集
 echo -e "${BLUE}[4/12] 配置日志采集...${NC}"
-sudo tee /etc/crowdsec/acquis.yaml > /dev/null << 'EOF'
+tee /etc/crowdsec/acquis.yaml > /dev/null << 'EOF'
 # SSH日志采集 - 主要防护目标
 filenames:
   - /var/log/auth.log
@@ -128,15 +148,15 @@ echo -e "${GREEN}  ✓ 日志采集配置完成${NC}"
 # 5. 安装防火墙Bouncer
 echo -e "${BLUE}[5/12] 安装防火墙Bouncer...${NC}"
 if ! dpkg -l | grep -q crowdsec-firewall-bouncer; then
-    sudo DEBIAN_FRONTEND=noninteractive apt install -y crowdsec-firewall-bouncer-iptables ipset >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt install -y crowdsec-firewall-bouncer-iptables ipset >/dev/null 2>&1
     echo -e "${GREEN}  ✓ 防火墙Bouncer安装成功${NC}"
 else
     echo "  防火墙Bouncer已安装"
 fi
 
 # 配置Bouncer
-if ! sudo cscli bouncers list 2>/dev/null | grep -q firewall-bouncer; then
-    sudo cscli bouncers add firewall-bouncer >/dev/null 2>&1
+if ! cscli bouncers list 2>/dev/null | grep -q firewall-bouncer; then
+    cscli bouncers add firewall-bouncer >/dev/null 2>&1
     echo -e "${GREEN}  ✓ API密钥已创建${NC}"
 fi
 
@@ -145,26 +165,26 @@ echo -e "${BLUE}[6/12] 安装保护场景...${NC}"
 
 # SSH保护（核心）
 echo "  安装SSH保护..."
-sudo cscli collections install crowdsecurity/sshd -q 2>/dev/null || true
+cscli collections install crowdsecurity/sshd -q 2>/dev/null || true
 
 # Linux系统保护
 echo "  安装Linux保护..."
-sudo cscli collections install crowdsecurity/linux -q 2>/dev/null || true
+cscli collections install crowdsecurity/linux -q 2>/dev/null || true
 
 # 基础防护
 echo "  安装基础防护..."
-sudo cscli collections install crowdsecurity/base-http-scenarios -q 2>/dev/null || true
+cscli collections install crowdsecurity/base-http-scenarios -q 2>/dev/null || true
 
 # 端口扫描检测
 echo "  安装端口扫描检测..."
-sudo cscli scenarios install crowdsecurity/portscan -q 2>/dev/null || true
+cscli scenarios install crowdsecurity/portscan -q 2>/dev/null || true
 
 echo -e "${GREEN}  ✓ 保护场景安装完成${NC}"
 
 # 7. 修复CDN白名单问题
 echo -e "${BLUE}[7/12] 处理CDN白名单...${NC}"
 # 移除有问题的自动下载组件
-sudo cscli postoverflows remove crowdsecurity/cdn-whitelist 2>/dev/null || true
+cscli postoverflows remove crowdsecurity/cdn-whitelist 2>/dev/null || true
 
 # 不创建固定白名单，因为用户IP不固定
 echo -e "${GREEN}  ✓ 已移除固定白名单（适合动态IP）${NC}"
@@ -174,7 +194,7 @@ echo -e "${BLUE}[8/12] 配置社区威胁情报...${NC}"
 
 # 订阅社区黑名单
 echo "  配置社区黑名单订阅..."
-sudo tee /etc/crowdsec/console.yaml > /dev/null << 'EOF'
+tee /etc/crowdsec/console.yaml > /dev/null << 'EOF'
 # CrowdSec Console配置 - 启用社区威胁情报
 # 注册账号获取: https://app.crowdsec.net
 enabled: true
@@ -186,16 +206,16 @@ EOF
 # 安装额外的威胁检测场景
 echo "  安装高级威胁检测..."
 # CVE漏洞利用检测
-sudo cscli scenarios install crowdsecurity/CVE-2021-41773 -q 2>/dev/null || true
-sudo cscli scenarios install crowdsecurity/CVE-2022-26134 -q 2>/dev/null || true
+cscli scenarios install crowdsecurity/CVE-2021-41773 -q 2>/dev/null || true
+cscli scenarios install crowdsecurity/CVE-2022-26134 -q 2>/dev/null || true
 
 echo -e "${GREEN}  ✓ 社区威胁情报配置完成${NC}"
 
 # 9. 配置封禁策略
 echo -e "${BLUE}[9/12] 配置封禁策略...${NC}"
-sudo cp /etc/crowdsec/profiles.yaml /etc/crowdsec/profiles.yaml.backup 2>/dev/null || true
+cp /etc/crowdsec/profiles.yaml /etc/crowdsec/profiles.yaml.backup 2>/dev/null || true
 
-sudo tee /etc/crowdsec/profiles.yaml > /dev/null << 'EOF'
+tee /etc/crowdsec/profiles.yaml > /dev/null << 'EOF'
 # 默认IP封禁策略
 name: default_ip_remediation
 debug: false
@@ -245,7 +265,7 @@ echo -e "${GREEN}  ✓ 封禁策略配置完成${NC}"
 echo -e "${BLUE}[10/12] 创建管理工具...${NC}"
 
 # 解封工具
-sudo tee /usr/local/bin/cs-unban > /dev/null << 'EOF'
+tee /usr/local/bin/cs-unban > /dev/null << 'EOF'
 #!/bin/bash
 if [[ $# -eq 0 ]]; then
     echo "用法: cs-unban <IP地址>"
@@ -268,7 +288,7 @@ fi
 EOF
 
 # 状态检查工具
-sudo tee /usr/local/bin/cs-status > /dev/null << 'EOF'
+tee /usr/local/bin/cs-status > /dev/null << 'EOF'
 #!/bin/bash
 echo "========================================"
 echo "         CrowdSec安全状态"
@@ -312,7 +332,7 @@ sudo journalctl -u crowdsec -n 100 --no-pager 2>/dev/null | grep "ban '.*'" | ta
 EOF
 
 # 监控工具
-sudo tee /usr/local/bin/cs-monitor > /dev/null << 'EOF'
+tee /usr/local/bin/cs-monitor > /dev/null << 'EOF'
 #!/bin/bash
 echo "CrowdSec实时监控 (Ctrl+C退出)"
 echo "================================"
@@ -325,7 +345,7 @@ done
 EOF
 
 # 白名单管理（用于临时需要）
-sudo tee /usr/local/bin/cs-whitelist > /dev/null << 'EOF'
+tee /usr/local/bin/cs-whitelist > /dev/null << 'EOF'
 #!/bin/bash
 ACTION=$1
 IP=$2
@@ -371,14 +391,14 @@ esac
 EOF
 
 # 设置执行权限
-sudo chmod +x /usr/local/bin/cs-{unban,status,monitor,whitelist}
+chmod +x /usr/local/bin/cs-{unban,status,monitor,whitelist}
 echo -e "${GREEN}  ✓ 管理工具创建完成${NC}"
 
 # 11. 优化配置
 echo -e "${BLUE}[11/12] 优化系统配置...${NC}"
 
 # 配置日志轮转
-sudo tee /etc/logrotate.d/crowdsec > /dev/null << 'EOF'
+tee /etc/logrotate.d/crowdsec > /dev/null << 'EOF'
 /var/log/crowdsec.log {
     daily
     rotate 7
@@ -394,21 +414,21 @@ sudo tee /etc/logrotate.d/crowdsec > /dev/null << 'EOF'
 EOF
 
 # 创建自定义白名单文件
-sudo touch /etc/crowdsec/whitelists/custom.txt
+touch /etc/crowdsec/whitelists/custom.txt
 echo -e "${GREEN}  ✓ 系统优化完成${NC}"
 
 # 12. 启动服务
 echo -e "${BLUE}[12/12] 启动服务...${NC}"
 
 # 重启CrowdSec核心
-sudo systemctl daemon-reload
-sudo systemctl enable crowdsec >/dev/null 2>&1
-sudo systemctl restart crowdsec
+systemctl daemon-reload
+systemctl enable crowdsec >/dev/null 2>&1
+systemctl restart crowdsec
 sleep 3
 
 # 重启防火墙Bouncer
-sudo systemctl enable crowdsec-firewall-bouncer >/dev/null 2>&1
-sudo systemctl restart crowdsec-firewall-bouncer
+systemctl enable crowdsec-firewall-bouncer >/dev/null 2>&1
+systemctl restart crowdsec-firewall-bouncer
 sleep 2
 
 echo -e "${GREEN}  ✓ 服务启动完成${NC}"
@@ -423,14 +443,14 @@ ERRORS=0
 WARNINGS=0
 
 # 检查服务状态
-if sudo systemctl is-active --quiet crowdsec; then
+if systemctl is-active --quiet crowdsec; then
     echo -e "${GREEN}✓ CrowdSec核心运行正常${NC}"
 else
     echo -e "${RED}✗ CrowdSec核心未运行${NC}"
     ERRORS=$((ERRORS + 1))
 fi
 
-if sudo systemctl is-active --quiet crowdsec-firewall-bouncer; then
+if systemctl is-active --quiet crowdsec-firewall-bouncer; then
     echo -e "${GREEN}✓ 防火墙Bouncer运行正常${NC}"
 else
     echo -e "${RED}✗ 防火墙Bouncer未运行${NC}"
@@ -438,7 +458,7 @@ else
 fi
 
 # 检查SSH保护
-if sudo cscli collections list 2>/dev/null | grep -q "crowdsecurity/sshd.*true"; then
+if cscli collections list 2>/dev/null | grep -q "crowdsecurity/sshd.*true"; then
     echo -e "${GREEN}✓ SSH保护已启用${NC}"
 else
     echo -e "${YELLOW}⚠ SSH保护未启用${NC}"
@@ -446,7 +466,7 @@ else
 fi
 
 # 检查日志收集
-LOG_LINES=$(sudo cscli metrics 2>/dev/null | grep "file:/var/log/auth.log" | awk '{print $3}' || echo "0")
+LOG_LINES=$(cscli metrics 2>/dev/null | grep "file:/var/log/auth.log" | awk '{print $3}' || echo "0")
 if [ "$LOG_LINES" != "0" ] && [ "$LOG_LINES" != "-" ]; then
     echo -e "${GREEN}✓ 正在分析SSH日志${NC}"
 else
