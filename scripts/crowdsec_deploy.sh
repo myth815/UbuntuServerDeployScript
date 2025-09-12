@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo "================================================"
-echo "   CrowdSec安全防护系统部署脚本 v2.2"
+echo "   CrowdSec安全防护系统部署脚本 v2.1"
 echo "   优化: 社区黑名单 | 动态IP友好"
 echo "================================================"
 echo ""
@@ -386,6 +386,72 @@ case $ACTION in
         echo "  cs-whitelist add <IP>     - 添加IP到白名单"
         echo "  cs-whitelist remove <IP>  - 从白名单移除IP"
         echo "  cs-whitelist list         - 列出白名单"
+        ;;
+esac
+EOF
+
+# 测试工具（新增）
+tee /usr/local/bin/cs-test > /dev/null << 'EOF'
+#!/bin/bash
+echo "CrowdSec测试工具"
+echo "================"
+echo ""
+
+ACTION=${1:-simulate}
+
+case $ACTION in
+    simulate)
+        echo "模拟SSH暴力破解攻击..."
+        TEST_IP="203.0.113.$(($RANDOM % 254 + 1))"
+        echo "使用测试IP: $TEST_IP"
+        
+        # 在日志中注入失败记录
+        for i in {1..15}; do
+            echo "$(date '+%b %d %H:%M:%S') $(hostname) sshd[$]: Failed password for invalid user admin from $TEST_IP port 40000 ssh2" | sudo tee -a /var/log/auth.log >/dev/null
+            echo -n "."
+        done
+        echo ""
+        
+        # 重载CrowdSec
+        echo "触发CrowdSec分析..."
+        sudo systemctl reload crowdsec
+        
+        # 等待处理
+        echo "等待10秒..."
+        sleep 10
+        
+        # 显示结果
+        echo ""
+        echo "检测结果:"
+        echo "=========="
+        ALERTS=$(sudo cscli alerts list 2>/dev/null | grep -c "$TEST_IP")
+        if [ "$ALERTS" -gt 0 ]; then
+            echo "✅ 检测到攻击！"
+            sudo cscli alerts list | grep "$TEST_IP"
+            echo ""
+            echo "封禁决策:"
+            sudo cscli decisions list | grep "$TEST_IP" || echo "暂无封禁"
+        else
+            echo "⚠️ 未检测到攻击，可能需要更多时间"
+            echo "手动检查: sudo cscli alerts list"
+        fi
+        ;;
+        
+    clean)
+        echo "清理测试数据..."
+        # 删除测试IP的决策
+        TEST_IPS=$(sudo cscli decisions list -o raw 2>/dev/null | grep "203.0.113" | awk '{print $2}')
+        for IP in $TEST_IPS; do
+            echo "删除测试IP: $IP"
+            sudo cscli decisions delete --ip "$IP"
+        done
+        echo "✅ 清理完成"
+        ;;
+        
+    *)
+        echo "用法:"
+        echo "  cs-test simulate  - 模拟攻击测试"
+        echo "  cs-test clean     - 清理测试数据"
         ;;
 esac
 EOF
