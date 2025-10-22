@@ -1,18 +1,27 @@
 #!/bin/bash
 set -euo pipefail
 
-# SSH 极致安全配置脚本 - 可维护版 v6.2
-# - 云防火墙为第一道防线：默认关闭 SSH 端口，仅需要时临时放行
-# - SSH 仅密钥登录；root SSH 登录禁止
-# - 保留 PAM：sudo/passwd/su 正常可用
-# - 默认端口 9833（可用 SSH_PORT 覆盖）
-# - 无交互、可备份、可回滚、支持 systemd socket 激活
+# SSH 极致安全配置脚本 - v6.3（安全扶梯版）
+# 目标：
+#  - 云防火墙为第一道防线（默认关闭 SSH，临时放通）
+#  - SSH 仅密钥登录；root SSH 登录禁止
+#  - 保留 PAM（sudo/passwd/su 正常）
+#  - 首次部署启用“双端口扶梯”：同时监听 22 与新端口，避免锁死
+#  - 提供一键移除 22 的管理命令
 #
-# 作者：myth815（基于 v6.1 修订）
-# 更新：2025-01-11 → v6.2
+# 用法（推荐非 root 身份执行）：
+#   SSH_USER=myuser SSH_PORT=9833 bash ./ssh_ultimate_security.sh
+#
+# 可选环境变量：
+#   SSH_USER=<非root用户>        # 必须是非 root
+#   SSH_PORT=<端口>              # 默认 9833
+#   FORCE_SINGLE_PORT=1          # 仅使用新端口（不推荐首轮）
+#
+# 作者：myth815（基于 v6.1/6.2 修订）
+# 日期：2025-01-11
 
-echo "🔐 SSH 安全配置部署 (v6.2 - 可维护版)"
-echo "====================================="
+echo "🔐 SSH 安全配置部署 (v6.3 - 安全扶梯版)"
+echo "======================================="
 
 # 颜色
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -24,23 +33,31 @@ else
   SUDO=""
 fi
 
-# 参数
+# 参数与防呆
 SSH_PORT="${SSH_PORT:-9833}"
 SSH_USER="${SSH_USER:-$(whoami)}"
+FORCE_SINGLE_PORT="${FORCE_SINGLE_PORT:-0}"
 BACKUP_DIR="/etc/ssh/backups"
 BACKUP_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+MANAGED_TAG="# Managed-By: myth815-ssh-sec v6.3"
 
 echo "⚙️  参数："
 echo "   • SSH 端口 : $SSH_PORT"
 echo "   • 允许用户 : $SSH_USER（root 禁止 SSH 登录）"
+echo "   • 扶梯模式 : $([ "$FORCE_SINGLE_PORT" = "1" ] && echo 单端口 || echo 双端口_22+$SSH_PORT)"
 echo "   • 备份目录 : $BACKUP_DIR"
 echo ""
 
-# 校验用户
+# 用户校验
 if ! id "$SSH_USER" &>/dev/null; then
   echo -e "${RED}❌ 用户不存在：$SSH_USER${NC}"
   echo "   请先创建：sudo useradd -m -s /bin/bash $SSH_USER"
   exit 1
+fi
+if [ "$SSH_USER" = "root" ]; then
+  echo -e "${RED}❌ SSH_USER 解析为 'root'，为避免 AllowUsers root + 禁止 root 登录 导致自锁，脚本退出。${NC}"
+  echo "   正确用法示例：SSH_USER=myuser SSH_PORT=$SSH_PORT bash $0"
+  exit 2
 fi
 
 # 运行目录
@@ -56,15 +73,9 @@ echo "   ✅ /run/sshd ready"
 # 备份
 echo "🗄️  备份配置..."
 $SUDO mkdir -p "$BACKUP_DIR"
-if [ -f /etc/ssh/sshd_config ]; then
-  $SUDO cp /etc/ssh/sshd_config "$BACKUP_DIR/sshd_config.$BACKUP_TIMESTAMP"
-fi
-if [ -d /etc/ssh/sshd_config.d ]; then
-  $SUDO tar -czf "$BACKUP_DIR/sshd_config.d.$BACKUP_TIMESTAMP.tgz" -C /etc/ssh sshd_config.d 2>/dev/null || true
-fi
-if [ -d /etc/systemd/system/ssh.socket.d ]; then
-  $SUDO tar -czf "$BACKUP_DIR/ssh.socket.d.$BACKUP_TIMESTAMP.tgz" -C /etc/systemd/system ssh.socket.d 2>/dev/null || true
-fi
+[ -f /etc/ssh/sshd_config ] && $SUDO cp /etc/ssh/sshd_config "$BACKUP_DIR/sshd_config.$BACKUP_TIMESTAMP"
+[ -d /etc/ssh/sshd_config.d ] && $SUDO tar -czf "$BACKUP_DIR/sshd_config.d.$BACKUP_TIMESTAMP.tgz" -C /etc/ssh sshd_config.d 2>/dev/null || true
+[ -d /etc/systemd/system/ssh.socket.d ] && $SUDO tar -czf "$BACKUP_DIR/ssh.socket.d.$BACKUP_TIMESTAMP.tgz" -C /etc/systemd/system ssh.socket.d 2>/dev/null || true
 echo "   ✅ 已备份至 $BACKUP_DIR"
 
 # 检测 systemd socket 激活
@@ -89,11 +100,12 @@ $SUDO rm -f /etc/ssh/sshd_config.d/01-permitrootlogin.conf 2>/dev/null || true
 $SUDO rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf 2>/dev/null || true
 echo "   ✅ 冲突配置已清理"
 
-# 生成最终配置（仅密钥登录；root 禁止；保留 PAM）
+# 生成最终配置（仅密钥；root 禁止；保留 PAM；扶梯模式）
 echo "⚙️  写入最终配置（/etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf）..."
 $SUDO tee /etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf >/dev/null <<EOF
-# SSH 安全配置 v6.2（root 禁止登录；仅密钥；PAM 保留）
-# ———— 本配置要求云防火墙默认关闭 SSH 端口，仅需要时临时放行 —— #
+$MANAGED_TAG
+# SSH 安全配置 v6.3（root 禁止登录；仅密钥；PAM 保留；扶梯模式）
+# ———— 首次部署建议云防火墙暂时放通 22 与 $SSH_PORT，确认后再关闭 22 —— #
 
 # 认证策略
 PermitRootLogin no
@@ -114,7 +126,7 @@ LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
 
-# 加密与算法（兼顾现代与兼容）
+# 加密与算法
 KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
@@ -138,7 +150,7 @@ MaxStartups 3:50:10
 AddressFamily any
 ListenAddress 0.0.0.0:$SSH_PORT
 ListenAddress [::]:$SSH_PORT
-Port $SSH_PORT
+$( [ "$FORCE_SINGLE_PORT" = "1" ] && echo "Port $SSH_PORT" || printf "Port 22\nPort %s" "$SSH_PORT" )
 
 # 日志
 LogLevel VERBOSE
@@ -154,11 +166,12 @@ $SUDO sed -i 's/^#\?KbdInteractiveAuthentication .*/KbdInteractiveAuthentication
 $SUDO sed -i 's/^#\?ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config || true
 $SUDO sed -i 's/^#\?UsePAM .*/UsePAM yes/' /etc/ssh/sshd_config || true
 
-# socket 激活覆盖
+# socket 激活覆盖（扶梯模式下双端口）
 if [ "$USE_SOCKET" = true ]; then
   echo "🧩 配置 ssh.socket 覆盖..."
   $SUDO mkdir -p /etc/systemd/system/ssh.socket.d/
-  $SUDO tee /etc/systemd/system/ssh.socket.d/override.conf >/dev/null <<EOF
+  if [ "$FORCE_SINGLE_PORT" = "1" ]; then
+    $SUDO tee /etc/systemd/system/ssh.socket.d/override.conf >/dev/null <<EOF
 [Socket]
 ListenStream=
 ListenStream=0.0.0.0:$SSH_PORT
@@ -166,6 +179,18 @@ ListenStream=[::]:$SSH_PORT
 FreeBind=yes
 Backlog=128
 EOF
+  else
+    $SUDO tee /etc/systemd/system/ssh.socket.d/override.conf >/dev/null <<EOF
+[Socket]
+ListenStream=
+ListenStream=0.0.0.0:22
+ListenStream=[::]:22
+ListenStream=0.0.0.0:$SSH_PORT
+ListenStream=[::]:$SSH_PORT
+FreeBind=yes
+Backlog=128
+EOF
+  fi
   $SUDO systemctl daemon-reload
   echo "   ✅ socket 覆盖完成"
 fi
@@ -185,33 +210,35 @@ if ! $SUDO sshd -t 2>/dev/null; then
 fi
 echo "   ✅ 语法检查通过"
 
-# 关键密钥检查
+# 密钥检查
 echo "🔑 检查 $SSH_USER 的密钥..."
 USER_HOME="$(eval echo ~$SSH_USER)"
 SSH_DIR="$USER_HOME/.ssh"
 AUTHORIZED_KEYS="$SSH_DIR/authorized_keys"
 if [ -f "$AUTHORIZED_KEYS" ]; then
   KEY_COUNT="$(wc -l < "$AUTHORIZED_KEYS" 2>/dev/null || echo 0)"
-  echo "   ✅ 已发现授权密钥（$KEY_COUNT 行）"
+  echo "   ✅ 授权密钥：$KEY_COUNT 行"
   $SUDO chown -R "$SSH_USER:$SSH_USER" "$SSH_DIR"
   $SUDO chmod 700 "$SSH_DIR"
   $SUDO chmod 600 "$AUTHORIZED_KEYS"
 else
   echo -e "${YELLOW}⚠️  未找到授权密钥文件：$AUTHORIZED_KEYS${NC}"
-  echo "   请务必先写入公钥再从外部暴露 SSH 端口！"
+  echo "   请先写入公钥，再在云防火墙放通新端口！"
 fi
 
-# 本地防火墙（可选，仅添加规则，不自动启用）
+# 本地防火墙（仅加规则，不强制启用）
 echo "🧯 更新本地防火墙规则（可选）..."
 if command -v ufw >/dev/null 2>&1; then
   $SUDO ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
-  echo "   ✅ UFW 已允许 $SSH_PORT/tcp（未强制 enable）"
+  [ "$FORCE_SINGLE_PORT" != "1" ] && $SUDO ufw allow 22/tcp >/dev/null 2>&1 || true
+  echo "   ✅ UFW 已添加允许规则（未强制 enable）"
 fi
 if command -v firewall-cmd >/dev/null 2>&1; then
   if $SUDO firewall-cmd --state 2>/dev/null | grep -q running; then
     $SUDO firewall-cmd --permanent --add-port="$SSH_PORT"/tcp >/dev/null 2>&1 || true
+    [ "$FORCE_SINGLE_PORT" != "1" ] && $SUDO firewall-cmd --permanent --add-port=22/tcp >/dev/null 2>&1 || true
     $SUDO firewall-cmd --reload >/dev/null 2>&1 || true
-    echo "   ✅ firewalld 已允许 $SSH_PORT/tcp"
+    echo "   ✅ firewalld 已添加允许规则"
   fi
 fi
 
@@ -223,8 +250,8 @@ if [ "$USE_SOCKET" = true ]; then
   $SUDO systemctl stop ssh.socket 2>/dev/null || true
   $SUDO systemctl start ssh.socket
   echo "   ✅ socket 模式启动"
-  # 触发一次
   timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$SSH_PORT" 2>/dev/null || true
+  [ "$FORCE_SINGLE_PORT" != "1" ] && timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/22" 2>/dev/null || true
 else
   $SUDO systemctl restart ssh
   echo "   ✅ 传统模式重启完成"
@@ -236,34 +263,50 @@ echo "🧪 状态验证..."
 PASSWORD_AUTH="$($SUDO timeout 5 sshd -T 2>/dev/null | awk '/^passwordauthentication/{print $2}')"
 PUBKEY_AUTH="$($SUDO timeout 5 sshd -T 2>/dev/null | awk '/^pubkeyauthentication/{print $2}')"
 ROOT_LOGIN="$($SUDO timeout 5 sshd -T 2>/dev/null | awk '/^permitrootlogin/{print $2}')"
-ACTUAL_PORT="$($SUDO timeout 5 sshd -T 2>/dev/null | awk '/^port/{print $2}')"
-echo "   • port                 : ${ACTUAL_PORT:-unknown}"
-echo "   • pubkeyauthentication : ${PUBKEY_AUTH:-unknown}  (expect: yes)"
+PORTS="$($SUDO timeout 5 sshd -T 2>/dev/null | awk '/^port/{print $2}' | xargs echo -n || true)"
+echo "   • pubkeyauthentication : ${PUBKEY_AUTH:-unknown}   (expect: yes)"
 echo "   • passwordauthentication: ${PASSWORD_AUTH:-unknown} (expect: no, SSH 仅密钥)"
-echo "   • permitrootlogin      : ${ROOT_LOGIN:-unknown}   (expect: no)"
+echo "   • permitrootlogin      : ${ROOT_LOGIN:-unknown}    (expect: no)"
+echo "   • ports (sshd -T)      : ${PORTS:-unknown}"
 
-LISTEN_V4="$($SUDO ss -tlnp | grep -c "0.0.0.0:$SSH_PORT" || true)"
-LISTEN_V6="$($SUDO ss -tlnp | grep -c "\[::\]:$SSH_PORT" || true)"
-[ "$LISTEN_V4" -gt 0 ] && echo "   ✅ IPv4 :$SSH_PORT 正在监听" || echo "   ℹ️  IPv4 :$SSH_PORT 暂未监听（socket 模式可能需首次连接触发）"
-[ "$LISTEN_V6" -gt 0 ] && echo "   ✅ IPv6 :$SSH_PORT 正在监听" || echo "   ℹ️  IPv6 :$SSH_PORT 暂未监听"
+LISTEN_V4_NEW="$($SUDO ss -tlnp | grep -c "0.0.0.0:$SSH_PORT" || true)"
+LISTEN_V6_NEW="$($SUDO ss -tlnp | grep -c "\[::\]:$SSH_PORT" || true)"
+[ "$FORCE_SINGLE_PORT" != "1" ] && LISTEN_V4_22="$($SUDO ss -tlnp | grep -c "0.0.0.0:22 " || true)" || LISTEN_V4_22=0
+[ "$FORCE_SINGLE_PORT" != "1" ] && LISTEN_V6_22="$($SUDO ss -tlnp | grep -c "\[::\]:22 " || true)" || LISTEN_V6_22=0
 
-# 管理工具
+[ "$LISTEN_V4_NEW" -gt 0 ] || [ "$LISTEN_V6_NEW" -gt 0 ] \
+  && echo "   ✅ 新端口 $SSH_PORT 正在监听（本机层面）" \
+  || echo -e "   ${YELLOW}⚠️ 新端口 $SSH_PORT 暂未监听（若为 socket 模式或云防火墙未放通，属正常现象）${NC}"
+
+if [ "$FORCE_SINGLE_PORT" != "1" ]; then
+  [ "$LISTEN_V4_22" -gt 0 ] || [ "$LISTEN_V6_22" -gt 0 ] \
+    && echo "   ✅ 端口 22 仍在监听（扶梯已就绪）" \
+    || echo -e "   ${YELLOW}⚠️ 端口 22 未监听；若云防火墙未放通新端口，可能无法远程连接${NC}"
+fi
+
+# 安装管理工具（含“一键移除 22”）
 echo "📝 安装管理工具 /usr/local/bin/ssh-security-manage ..."
 $SUDO tee /usr/local/bin/ssh-security-manage >/dev/null <<'SCRIPT_EOF'
 #!/bin/bash
 set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-cmd="${1:-status}"
-case "$cmd" in
+cfg='/etc/ssh/sshd_config.d/99-zzz-ultimate-security.conf'
+drop22() {
+  if [ ! -f "$cfg" ]; then echo -e "${RED}未找到配置: $cfg${NC}"; exit 1; fi
+  sudo sed -i '/^Port 22$/d' "$cfg"
+  if [ -f /etc/systemd/system/ssh.socket.d/override.conf ]; then
+    sudo sed -i '/ListenStream=.*22/d' /etc/systemd/system/ssh.socket.d/override.conf || true
+  fi
+  sudo systemctl daemon-reload
+  sudo systemctl restart ssh || sudo systemctl restart ssh.socket || true
+  echo -e "${GREEN}✅ 已移除 22 并重启 SSH${NC}"
+}
+case "${1:-status}" in
   status)
-    echo "SSH 服务状态"; echo "============"
+    echo "SSH/Socket 状态"; echo "=============="
     sudo systemctl status ssh --no-pager -l || true
-    if systemctl list-units | grep -q ssh.socket; then
-      echo ""; echo "SSH Socket 状态"; echo "================"
-      sudo systemctl status ssh.socket --no-pager -l || true
-    fi
+    systemctl list-units | grep -q ssh.socket && { echo ""; sudo systemctl status ssh.socket --no-pager -l || true; }
     echo ""; echo "配置与监听"; echo "=========="
-    sudo mkdir -p /run/sshd /var/run/sshd 2>/dev/null || true
     timeout 5 sshd -T 2>/dev/null | awk '/^(port|passwordauthentication|pubkeyauthentication|permitrootlogin)/{print}'
     echo ""; sudo ss -tlnp | grep -E 'ssh|:22|:9833|:8022' || true
     ;;
@@ -276,50 +319,45 @@ case "$cmd" in
     sudo systemctl restart ssh || true
     echo -e "${GREEN}✅ 已恢复默认配置（端口 22）${NC}"
     ;;
+  drop22)
+    drop22
+    ;;
   test)
-    echo "本地连通性测试"; echo "============"
-    P="$(timeout 5 sshd -T 2>/dev/null | awk '/^port/{print $2; exit}')"
-    [ -z "${P:-}" ] && P="$(sudo ss -tlnp | awk '/ssh/ {print $4}' | sed -n 's/.*:\([0-9]\+\)$/\1/p' | head -1)"
-    echo "端口: ${P:-unknown}"
-    timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/${P:-22}" 2>/dev/null && echo -e "${GREEN}✅ IPv4 OK${NC}" || echo -e "${YELLOW}⚠️ IPv4 FAIL${NC}"
-    timeout 2 bash -c "echo > /dev/tcp/::1/${P:-22}" 2>/dev/null && echo -e "${GREEN}✅ IPv6 OK${NC}" || echo -e "${YELLOW}⚠️ IPv6 FAIL${NC}"
-    echo ""; timeout 5 sshd -T 2>/dev/null | awk '/^passwordauthentication/{print "passwordauthentication:",$2}'
+    P="$(timeout 5 sshd -T 2>/dev/null | awk '/^port/{print $2}' | tail -1)"
+    [ -z "${P:-}" ] && P=22
+    echo "本地测试端口: $P"
+    timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$P" 2>/dev/null && echo -e "${GREEN}✅ IPv4 OK${NC}" || echo -e "${YELLOW}⚠️ IPv4 FAIL${NC}"
+    timeout 2 bash -c "echo > /dev/tcp/::1/$P" 2>/dev/null && echo -e "${GREEN}✅ IPv6 OK${NC}" || echo -e "${YELLOW}⚠️ IPv6 FAIL${NC}"
     ;;
   diagnose)
     echo "诊断"; echo "===="
-    [ -d /run/sshd ] && echo -e "${GREEN}✅ /run/sshd 存在${NC}" || { echo -e "${RED}❌ 缺失 /run/sshd${NC}"; sudo mkdir -p /run/sshd && sudo chmod 755 /run/sshd; }
-    echo ""; systemctl show ssh.service -p TriggeredBy || true
-    if systemctl list-units | grep -q ssh.socket; then systemctl show ssh.socket -p Listen || true; fi
+    systemctl show ssh.service -p TriggeredBy || true
+    systemctl list-units | grep -q ssh.socket && systemctl show ssh.socket -p Listen || true
     echo ""; sudo ss -tlnp | grep -E 'ssh|:22|:9833|:8022' || true
     echo ""; sudo journalctl -u ssh -u ssh.socket -n 50 --no-pager || true
     ;;
   fix)
-    echo "快速修复"; echo "======"
     sudo mkdir -p /run/sshd /var/run/sshd; sudo chmod 755 /run/sshd /var/run/sshd
-    if systemctl list-units | grep -q ssh.socket; then
-      sudo systemctl restart ssh.socket
-      P="$(timeout 5 sshd -T 2>/dev/null | awk "/^port/{print \$2; exit}")"
-      [ -n "${P:-}" ] && { timeout 2 nc -zv 127.0.0.1 "$P" 2>/dev/null || true; timeout 2 nc -zv ::1 "$P" 2>/dev/null || true; }
-    else
-      sudo systemctl restart ssh
-    fi
+    systemctl list-units | grep -q ssh.socket && sudo systemctl restart ssh.socket || sudo systemctl restart ssh
     sleep 1; sudo ss -tlnp | grep ssh || true
     ;;
   *)
-    echo "用法: $0 {status|restore|test|diagnose|fix}"
+    echo "用法: $0 {status|restore|drop22|test|diagnose|fix}"
     ;;
 esac
 SCRIPT_EOF
 $SUDO chmod +x /usr/local/bin/ssh-security-manage
-echo "   ✅ 管理工具已安装"
+echo "   ✅ 管理工具已安装（含 drop22）"
 
 # 完成
 echo ""
-echo -e "${GREEN}✅ 部署完成（v6.2）${NC}"
+echo -e "${GREEN}✅ 部署完成（v6.3）${NC}"
 echo "————————————————————————————————"
-echo "• 策略：云防火墙关闭 SSH；仅密钥登录；root 禁止 SSH；PAM/sudo 正常。"
-echo "• 端口：$SSH_PORT"
-echo "• 用户：$SSH_USER"
-echo "• 管理：ssh-security-manage {status|test|diagnose|restore|fix}"
+echo "• 扶梯模式：当前监听端口 -> $([ "$FORCE_SINGLE_PORT" = "1" ] && echo "$SSH_PORT（单端口）" || echo "22 与 $SSH_PORT（双端口）")"
+echo "• 建议流程："
+echo "   1) 在云防火墙放通 $SSH_PORT；"
+echo "   2) 用密钥从新端口登录测试成功；"
+echo "   3) 执行：ssh-security-manage drop22（移除 22）并在云防火墙关闭 22。"
 echo ""
-echo "⚠️ 请务必先在 $AUTHORIZED_KEYS 写入公钥，再在云防火墙临时放行 $SSH_PORT 进行连接测试。"
+echo "⚠️ 如果你现在还未放通 $SSH_PORT，千万不要先关 22。"
+echo "   （本脚本已经为你保留 22 作为应急扶梯，除非你设置了 FORCE_SINGLE_PORT=1）"
